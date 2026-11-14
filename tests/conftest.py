@@ -1,5 +1,3 @@
-"""Shared fixtures. Each test gets its own SQLite file."""
-
 import sys
 from pathlib import Path
 

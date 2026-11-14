@@ -1,25 +1,13 @@
-# Python
 __pycache__/
 *.py[cod]
-*$py.class
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
 .venv/
 venv/
-env/
 
-# SQLite files created when the app runs. Do not commit parking data.
 *.db
 *.db-wal
 *.db-shm
-*.sqlite3
 
-# Secrets
 .streamlit/secrets.toml
 .env
-
-# OS / editor
 .DS_Store
-.idea/
-.vscode/
