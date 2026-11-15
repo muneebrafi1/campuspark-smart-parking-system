@@ -1,182 +1,168 @@
-# CampusPark project report
+# Electricity Billing — project report
 
-OOP lab, 3rd semester. A parking screen for a campus lot of 20 slots.
+OOP lab, 3rd semester. A small office screen for electricity customers and monthly bills.
 
 ## Abstract
 
-CampusPark lets an attendant park a car, motorcycle, or van, see the slots, and charge a fee on exit. The rules are Python classes. The screen is Streamlit. The records are in SQLite. Cars start at PKR 50 per hour, motorcycles at PKR 30, and vans at PKR 70. The minimum bill is one hour, and a partial hour is rounded up. We ran `python3 -m pytest tests -v` and got 14 passed, 0 failed.
+The program stores customers, meter readings, and bills. Domestic and commercial connections use different slab rates. Each bill also has a fixed charge and tax. After the due date, an unpaid bill gets a late surcharge. The screen is Streamlit and the file is SQLite. We ran `python3 -m pytest tests -v` and got 13 passed, 0 failed.
 
 ## 1. Introduction
 
-The gate needs to know which slots are free, which vehicle is in which slot, and what to charge on the way out. A list in memory disappears when the program stops. We keep the rows in `data/campuspark.db`.
+An electricity counter needs the customer, the meter reading, and a bill the customer can understand. We did not keep this in a list, because a list disappears when the program stops. The rows are in `data/billing.db`.
 
-## 2. What it does
+## 2. What it covers
 
-- Park a vehicle and give it the first free slot and a ticket id (`CP-1001`, then `CP-1002`, and so on).
-- Refuse a second entry if that registration is already inside.
-- Refuse entry when all 20 slots are taken.
-- Show the lot. Free slots are green, taken slots are red.
-- On exit, show duration, billed hours, rate, and total, then free the slot.
-- Let us edit the three hourly rates.
-- Search history and show a couple of charts.
+- Add, search, update, and delete customers (name, CNIC or ID, address, phone, meter, Domestic or Commercial).
+- One reading per customer per month. Current reading must be at least the previous reading.
+- A bill with slab energy, fixed charge, tax, and a late surcharge after the due date.
+- View the breakdown, mark a bill paid, and list unpaid or overdue bills.
+- A dashboard and a history search.
+- Rates saved in the database, so they can be edited without changing the classes.
 
-There is no login. We do not need one for this lab.
+There is no login.
 
 ## 3. Design
 
-The pages in `app.py` do not write SQL and do not multiply the fee. They call `ParkingManager`.
+`app.py` does not write SQL and does not do the slab maths. It calls `BillingManager`.
 
 ```text
 app.py
-  ParkingManager
-      DatabaseManager  ->  campuspark.db
-      PaymentCalculator
-      Vehicle / Car / Motorcycle / Van
-      ParkingSlot
-      ParkingTicket
+  BillingManager
+      DatabaseManager   ->  billing.db
+      TariffCalculator
+      Customer / DomesticCustomer / CommercialCustomer
+      MeterReading
+      Bill
 ```
 
-An entry is one database transaction. If the slot update fails, the ticket is not left half-saved. An exit is one transaction too.
+The reading and the bill are inserted in one transaction. If the bill insert fails, the reading is not left behind.
 
 ## 4. Class diagram
 
 ```mermaid
 classDiagram
-    class Vehicle {
-        -_registration_number
-        -_owner_name
-        +get_type()
-        +get_hourly_rate()
+    class Customer {
+        -_name
+        -_meter_number
+        +energy_charge()
+        +get_connection_type()
         +create()
     }
-    class Car
-    class Motorcycle
-    class Van
-    Vehicle <|-- Car
-    Vehicle <|-- Motorcycle
-    Vehicle <|-- Van
-    class ParkingSlot {
-        +occupy()
-        +release()
+    class DomesticCustomer
+    class CommercialCustomer
+    Customer <|-- DomesticCustomer
+    Customer <|-- CommercialCustomer
+    class MeterReading {
+        +units
     }
-    class ParkingTicket {
-        +close()
+    class Bill {
+        +mark_paid()
     }
-    class PaymentCalculator {
-        +billable_hours()
-        +calculate()
+    class TariffCalculator {
+        +quote()
     }
     class DatabaseManager {
-        +save_entry()
-        +save_exit()
+        +save_reading_and_bill()
     }
-    class ParkingManager {
+    class BillingManager {
         -_db
-        -_fees
-        +register_vehicle()
-        +exit_vehicle()
+        +add_reading()
+        +mark_paid()
     }
-    ParkingManager o-- DatabaseManager
-    ParkingManager o-- PaymentCalculator
-    ParkingManager --> Vehicle
-    ParkingManager --> ParkingSlot
-    ParkingManager --> ParkingTicket
+    BillingManager o-- DatabaseManager
+    BillingManager --> TariffCalculator
+    TariffCalculator --> Customer
+    BillingManager --> MeterReading
+    BillingManager --> Bill
 ```
 
-`Car`, `Motorcycle`, and `Van` do not add new attributes. They only override `get_type` and `get_hourly_rate`.
+`energy_charge` on `Customer` is not implemented. The two child classes replace it. `TariffCalculator` calls that method and then adds the fixed charge, tax, and late fee.
 
 ## 5. Database
 
-| Table | Rows |
+| Table | What it stores |
 | --- | --- |
-| `vehicles` | One per arrival: registration, owner, type, time |
-| `parking_slots` | Slots 1 to 20, available or occupied |
-| `parking_tickets` | One per visit. Status is `parked` or `completed` |
-| `transactions` | One payment per completed visit: hours, rate, fee |
-| `pricing` | Car, Motorcycle, Van and the hourly rate |
+| `customers` | Name, CNIC, address, phone, unique meter number, connection type |
+| `meter_readings` | Month, previous, current, units. One row per customer per month |
+| `bills` | Charges, due date, status (`unpaid` or `paid`), paid date |
+| `tariffs` | Slab units and rates, fixed charge, tax percent |
+| `settings` | `late_percent` and `due_days` |
 
-Times are stored as text, `YYYY-MM-DD HH:MM:SS`, so they sort easily.
+Queries that use a name or meter number use `?` placeholders.
 
-A unique index on `parking_tickets(registration_number)` where `status = 'parked'` blocks two active visits for the same plate.
+## 6. Default tariff
 
-User values go in as `?` parameters, not inside the SQL string.
+Domestic: 100 units at 10, next 100 at 20, the rest at 30. Fixed charge 100. Tax 10%.
 
-## 6. Fee
+Commercial: 100 units at 20, the rest at 40. Fixed charge 200. Tax 10%.
 
-| Stay | Hours billed |
-| --- | --- |
-| Up to 60 minutes | 1 |
-| Exactly 1 hour | 1 |
-| 1 hour 1 minute | 2 |
-| Exactly 3 hours | 3 |
+Late surcharge 10% after the due date. Due date is 15 days into the next month.
 
-Test 08 checks a real exit, not only the calculator: a car for 1 hour 20 minutes is PKR 100, a motorcycle for 20 minutes is PKR 30, and a van for exactly 3 hours is PKR 210.
+250 domestic units: energy 4,500 + fixed 100 + tax 460 = 5,060. If paid after the due date, add 506.
 
 ## 7. Testing
 
-Command:
+Command, from the project folder, on Python 3.12.3:
 
 ```bash
 python3 -m pytest tests -v --tb=line
 ```
 
-Output from the run on Python 3.12.3:
-
 ```text
 ============================= test session starts ==============================
 platform linux -- Python 3.12.3, pytest-9.2.0, pluggy-1.7.0 -- /usr/bin/python3
-collected 14 items
+collected 13 items
 
 tests/test_app.py::test_every_page_opens PASSED                          [  7%]
-tests/test_app.py::test_entry_form_parks_a_vehicle PASSED                [ 14%]
-tests/test_parking.py::test_01_register_new_vehicle PASSED               [ 21%]
-tests/test_parking.py::test_02_auto_allocate_first_free_slot PASSED      [ 28%]
-tests/test_parking.py::test_03_register_another_vehicle PASSED           [ 35%]
-tests/test_parking.py::test_04_occupied_slots_update PASSED              [ 42%]
-tests/test_parking.py::test_05_duplicate_parked_vehicle_rejected PASSED  [ 50%]
-tests/test_parking.py::test_06_parking_full_rejected PASSED              [ 57%]
-tests/test_parking.py::test_07_exit_vehicle PASSED                       [ 64%]
-tests/test_parking.py::test_08_fee_minimum_one_hour_and_round_up PASSED  [ 71%]
-tests/test_parking.py::test_09_released_slot_becomes_available PASSED    [ 78%]
-tests/test_parking.py::test_10_history_saved_after_exit PASSED           [ 85%]
-tests/test_parking.py::test_11_dashboard_stats_update PASSED             [ 92%]
-tests/test_parking.py::test_12_data_persists_after_new_database_manager PASSED [100%]
+tests/test_billing.py::test_add_customer PASSED                          [ 15%]
+tests/test_billing.py::test_duplicate_meter_rejected PASSED              [ 23%]
+tests/test_billing.py::test_reading_current_below_previous PASSED        [ 30%]
+tests/test_billing.py::test_duplicate_month_rejected PASSED              [ 38%]
+tests/test_billing.py::test_domestic_slab PASSED                         [ 46%]
+tests/test_billing.py::test_commercial_slab PASSED                       [ 53%]
+tests/test_billing.py::test_tax_and_fixed_charge PASSED                  [ 61%]
+tests/test_billing.py::test_late_surcharge PASSED                        [ 69%]
+tests/test_billing.py::test_mark_paid PASSED                             [ 76%]
+tests/test_billing.py::test_unpaid_list PASSED                           [ 84%]
+tests/test_billing.py::test_dashboard_stats PASSED                       [ 92%]
+tests/test_billing.py::test_persists_after_new_database_manager PASSED   [100%]
 
-============================== 14 passed in 0.82s ==============================
+============================== 13 passed in 0.88s ==============================
 ```
 
-| Test | What we checked | Result |
+Nothing was skipped.
+
+| Test | What it checked | Result |
 | --- | --- | --- |
-| 01 | New vehicle, cleaned registration, ticket `CP-1001` | Passed |
-| 02 | First vehicle gets slot 1 | Passed |
-| 03 | Second vehicle gets slot 2 and the next ticket id | Passed |
-| 04 | Occupied count becomes 2, slot 3 stays free | Passed |
-| 05 | Same plate, different spelling, is rejected | Passed |
-| 06 | 21st vehicle is rejected when the lot is full | Passed |
-| 07 | Exit marks the ticket completed and clears the active list | Passed |
-| 08 | Minimum 1 hour and rounding up, for car, motorcycle, and van | Passed |
-| 09 | Freed slot is available, and the same car can take it again | Passed |
-| 10 | History and the `transactions` row keep the fee | Passed |
-| 11 | Dashboard revenue and occupancy change after one exit | Passed |
-| 12 | A new `DatabaseManager` on the same file still sees the car and the edited rate | Passed |
+| `test_add_customer` | A domestic customer is saved and can be searched | Passed |
+| `test_duplicate_meter_rejected` | The same meter, even in different case, is rejected | Passed |
+| `test_reading_current_below_previous` | Current below previous saves nothing | Passed |
+| `test_duplicate_month_rejected` | A second reading for the same month is rejected | Passed |
+| `test_domestic_slab` | 250 domestic units give energy charge 4500 | Passed |
+| `test_commercial_slab` | 250 commercial units give energy charge 8000 | Passed |
+| `test_tax_and_fixed_charge` | 50 units: fixed 100, tax 60, total 660 | Passed |
+| `test_late_surcharge` | Paid after 15 Feb 2026 adds 506 to a 5060 bill | Passed |
+| `test_mark_paid` | Status becomes paid, and a second payment is rejected | Passed |
+| `test_unpaid_list` | Unpaid list has both bills; only the old one is overdue | Passed |
+| `test_dashboard_stats` | Pending and collected change after payment | Passed |
+| `test_persists_after_new_database_manager` | A new `DatabaseManager` on the same file still sees the customer | Passed |
+| `test_every_page_opens` | Streamlit opens all six pages | Passed |
 
-`test_every_page_opens` runs the Streamlit app headlessly and opens each page. `test_entry_form_parks_a_vehicle` submits the entry form and checks that ticket `CP-1001` appears.
-
-We also started the app and opened it in a browser to take the screenshots in `docs/screenshots/`. Those pictures use a few sample rows. The database file is not committed.
+The screenshots in `docs/screenshots/` are from a local run with a few sample customers. That database file is not in git.
 
 ## 8. Streamlit Cloud
 
-`app.py` is the entry file. `requirements.txt` pins Streamlit, pandas, and pytest to the versions we ran.
+`app.py` is still the file the existing deploy uses. `requirements.txt` pins the libraries we tested. `runtime.txt` asks for Python 3.12.
 
-The SQLite file survives normal clicks. On Streamlit Community Cloud a redeploy can delete it, because that disk is temporary. For marking, run the app locally.
+The SQLite file on Community Cloud can be removed on redeploy. The classes do not change because of that.
 
 ## 9. Conclusion
 
-The attendant can enter a vehicle, see the lot, charge a rounded fee, and find the visit later. The classes match the things in the problem. The tests above are the ones we actually ran.
+A clerk can add a customer, enter a reading, see the slab bill, and mark it paid. The two connection types share one parent class and price units in their own methods. The tests above are the run we actually did.
 
 ## 10. Team
 
-- **Student 1** — models, allocation, fees, and app integration.
-- **Student 2** — database, UI pages, entry and exit forms, testing, and documentation.
+- **Student 1** — models, tariff and billing logic, app integration.
+- **Student 2** — database, pages and forms, tests, and documentation.
 
-Both of us are supposed to understand the whole app, not only our own files.
+Both of us should understand the whole app.

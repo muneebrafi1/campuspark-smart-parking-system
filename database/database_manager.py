@@ -1,18 +1,18 @@
 import sqlite3
 from pathlib import Path
 
-from utils.exceptions import ParkingError
+from utils.exceptions import BillingError
 
 
 class DatabaseManager:
-    """Every SQL statement in the project is in this class."""
+    """All SQL for the billing app is in this class."""
 
-    def __init__(self, db_path, slot_count=20):
+    def __init__(self, db_path):
         self._db_path = str(db_path)
-        self._slot_count = slot_count
         Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self._db_path, timeout=10, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA foreign_keys = ON")
         self._create_tables()
 
     @property
@@ -30,240 +30,222 @@ class DatabaseManager:
         return [dict(row) for row in self._conn.execute(sql, params).fetchall()]
 
     def _create_tables(self):
-        # One row per arrival, one row per slot, one ticket per visit, one payment on exit.
         self._conn.executescript(
             """
-            CREATE TABLE IF NOT EXISTS vehicles (
+            CREATE TABLE IF NOT EXISTS customers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, cnic TEXT NOT NULL,
+                address TEXT NOT NULL, phone TEXT NOT NULL,
+                meter_number TEXT NOT NULL UNIQUE, connection_type TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS meter_readings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                registration_number TEXT NOT NULL,
-                owner_name TEXT NOT NULL,
-                vehicle_type TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS parking_slots (
-                slot_number INTEGER PRIMARY KEY,
-                status TEXT NOT NULL,
-                registration_number TEXT,
-                vehicle_type TEXT,
-                ticket_id TEXT
-            );
-            CREATE TABLE IF NOT EXISTS parking_tickets (
-                ticket_id TEXT PRIMARY KEY,
-                registration_number TEXT NOT NULL,
-                owner_name TEXT NOT NULL,
-                vehicle_type TEXT NOT NULL,
-                slot_number INTEGER NOT NULL,
-                entry_time TEXT NOT NULL,
-                status TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS transactions (
-                ticket_id TEXT PRIMARY KEY,
-                registration_number TEXT NOT NULL,
-                owner_name TEXT NOT NULL,
-                vehicle_type TEXT NOT NULL,
-                slot_number INTEGER NOT NULL,
-                entry_time TEXT NOT NULL,
-                exit_time TEXT NOT NULL,
-                duration_text TEXT NOT NULL,
-                billable_hours INTEGER NOT NULL,
-                hourly_rate REAL NOT NULL,
-                fee REAL NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS pricing (
-                vehicle_type TEXT PRIMARY KEY,
-                hourly_rate REAL NOT NULL
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS one_active_reg
-            ON parking_tickets (registration_number) WHERE status = 'parked';
+                customer_id INTEGER NOT NULL REFERENCES customers(id),
+                month TEXT NOT NULL, previous_reading REAL NOT NULL,
+                current_reading REAL NOT NULL, units REAL NOT NULL,
+                UNIQUE (customer_id, month));
+            CREATE TABLE IF NOT EXISTS bills (
+                bill_no TEXT PRIMARY KEY,
+                customer_id INTEGER NOT NULL REFERENCES customers(id),
+                reading_id INTEGER NOT NULL UNIQUE REFERENCES meter_readings(id),
+                month TEXT NOT NULL, units REAL NOT NULL,
+                energy_charge REAL NOT NULL, fixed_charge REAL NOT NULL, tax_amount REAL NOT NULL,
+                surcharge REAL NOT NULL, total REAL NOT NULL, due_date TEXT NOT NULL,
+                status TEXT NOT NULL, paid_date TEXT);
+            CREATE TABLE IF NOT EXISTS tariffs (
+                connection_type TEXT PRIMARY KEY,
+                slab1_units INTEGER NOT NULL, slab1_rate REAL NOT NULL,
+                slab2_units INTEGER NOT NULL, slab2_rate REAL NOT NULL, slab3_rate REAL NOT NULL,
+                fixed_charge REAL NOT NULL, tax_percent REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY, value REAL NOT NULL);
             """
         )
         self._conn.commit()
 
-    def seed_if_empty(self, rates):
-        if self._conn.execute("SELECT COUNT(*) FROM parking_slots").fetchone()[0] == 0:
-            self._conn.executemany(
-                "INSERT INTO parking_slots (slot_number, status) VALUES (?, 'available')",
-                [(n,) for n in range(1, self._slot_count + 1)],
-            )
-        if self._conn.execute("SELECT COUNT(*) FROM pricing").fetchone()[0] == 0:
-            self._conn.executemany(
-                "INSERT INTO pricing (vehicle_type, hourly_rate) VALUES (?, ?)",
-                list(rates.items()),
-            )
+    def seed_if_empty(self, tariffs, late_percent, due_days):
+        if self._conn.execute("SELECT COUNT(*) FROM tariffs").fetchone()[0] == 0:
+            for name, rates in tariffs.items():
+                self._conn.execute(
+                    """INSERT INTO tariffs (
+                        connection_type, slab1_units, slab1_rate, slab2_units, slab2_rate,
+                        slab3_rate, fixed_charge, tax_percent
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (name, rates["slab1_units"], rates["slab1_rate"], rates["slab2_units"],
+                     rates["slab2_rate"], rates["slab3_rate"], rates["fixed_charge"], rates["tax_percent"]),
+                )
+        if self._one("SELECT * FROM settings WHERE key = 'late_percent'") is None:
+            self._conn.execute("INSERT INTO settings (key, value) VALUES ('late_percent', ?)", (late_percent,))
+            self._conn.execute("INSERT INTO settings (key, value) VALUES ('due_days', ?)", (due_days,))
         self._conn.commit()
 
-    def next_ticket_id(self):
-        rows = self._all(
-            "SELECT ticket_id FROM parking_tickets UNION SELECT ticket_id FROM transactions"
-        )
-        highest = 1000
-        for row in rows:
-            number = row["ticket_id"][3:]
-            if row["ticket_id"].startswith("CP-") and number.isdigit():
-                highest = max(highest, int(number))
-        return f"CP-{highest + 1}"
-
-    def active_by_reg(self, registration_number):
-        return self._one(
-            "SELECT * FROM parking_tickets WHERE registration_number = ? AND status = 'parked'",
-            (registration_number,),
-        )
-
-    def active_by_ticket(self, ticket_id):
-        return self._one(
-            "SELECT * FROM parking_tickets WHERE ticket_id = ? AND status = 'parked'",
-            (ticket_id,),
-        )
-
-    def first_free_slot(self):
-        return self._one(
-            "SELECT * FROM parking_slots WHERE status = 'available' ORDER BY slot_number LIMIT 1"
-        )
-
-    def fetch_slots(self):
-        return self._all("SELECT * FROM parking_slots ORDER BY slot_number")
-
-    def active_tickets(self):
-        return self._all(
-            "SELECT * FROM parking_tickets WHERE status = 'parked' ORDER BY slot_number"
-        )
-
-    def save_entry(self, registration_number, owner_name, vehicle_type, slot_number, ticket_id, entry_time):
+    def insert_customer(self, name, cnic, address, phone, meter_number, connection_type):
         try:
-            with self._conn:
-                self._conn.execute(
-                    "INSERT INTO vehicles (registration_number, owner_name, vehicle_type, created_at) VALUES (?, ?, ?, ?)",
-                    (registration_number, owner_name, vehicle_type, entry_time),
-                )
-                self._conn.execute(
-                    """INSERT INTO parking_tickets
-                       (ticket_id, registration_number, owner_name, vehicle_type, slot_number, entry_time, status)
-                       VALUES (?, ?, ?, ?, ?, ?, 'parked')""",
-                    (ticket_id, registration_number, owner_name, vehicle_type, slot_number, entry_time),
-                )
-                updated = self._conn.execute(
-                    """UPDATE parking_slots
-                       SET status = 'occupied', registration_number = ?, vehicle_type = ?, ticket_id = ?
-                       WHERE slot_number = ? AND status = 'available'""",
-                    (registration_number, vehicle_type, ticket_id, slot_number),
-                )
-                if updated.rowcount != 1:
-                    raise ParkingError("Could not assign that slot.")
-        except ParkingError:
+            cur = self._conn.execute(
+                """INSERT INTO customers (name, cnic, address, phone, meter_number, connection_type)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (name, cnic, address, phone, meter_number, connection_type),
+            )
+            self._conn.commit()
+            return cur.lastrowid
+        except sqlite3.IntegrityError:
+            raise BillingError(f"Meter {meter_number} is already registered.")
+        except sqlite3.Error:
+            raise BillingError("Could not save the customer.")
+
+    def update_customer(self, customer_id, name, cnic, address, phone, meter_number, connection_type):
+        try:
+            updated = self._conn.execute(
+                """UPDATE customers
+                   SET name = ?, cnic = ?, address = ?, phone = ?, meter_number = ?, connection_type = ?
+                   WHERE id = ?""",
+                (name, cnic, address, phone, meter_number, connection_type, customer_id),
+            )
+            self._conn.commit()
+            if updated.rowcount != 1:
+                raise BillingError("Customer was not found.")
+        except BillingError:
             raise
         except sqlite3.IntegrityError:
-            raise ParkingError(f"{registration_number} is already parked.")
+            raise BillingError(f"Meter {meter_number} is already registered.")
         except sqlite3.Error:
-            raise ParkingError("Could not save the entry. Please try again.")
+            raise BillingError("Could not update the customer.")
 
-    def save_exit(self, ticket, exit_time, duration_text, billable_hours, hourly_rate, fee):
-        try:
-            with self._conn:
-                closed = self._conn.execute(
-                    "UPDATE parking_tickets SET status = 'completed' WHERE ticket_id = ? AND status = 'parked'",
-                    (ticket["ticket_id"],),
-                )
-                if closed.rowcount != 1:
-                    raise ParkingError("This visit is no longer active.")
-                self._conn.execute(
-                    """INSERT INTO transactions (
-                        ticket_id, registration_number, owner_name, vehicle_type, slot_number,
-                        entry_time, exit_time, duration_text, billable_hours, hourly_rate, fee
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        ticket["ticket_id"], ticket["registration_number"], ticket["owner_name"],
-                        ticket["vehicle_type"], ticket["slot_number"], ticket["entry_time"],
-                        exit_time, duration_text, billable_hours, hourly_rate, fee,
-                    ),
-                )
-                freed = self._conn.execute(
-                    """UPDATE parking_slots
-                       SET status = 'available', registration_number = NULL, vehicle_type = NULL, ticket_id = NULL
-                       WHERE slot_number = ? AND ticket_id = ?""",
-                    (ticket["slot_number"], ticket["ticket_id"]),
-                )
-                if freed.rowcount != 1:
-                    raise ParkingError("Could not free the slot for this ticket.")
-        except ParkingError:
-            raise
-        except sqlite3.Error:
-            raise ParkingError("Could not save the exit. Please try again.")
-
-    def get_transaction(self, ticket_id):
-        return self._one("SELECT * FROM transactions WHERE ticket_id = ?", (ticket_id,))
-
-    def get_rates(self):
-        rows = self._all("SELECT vehicle_type, hourly_rate FROM pricing")
-        return {row["vehicle_type"]: float(row["hourly_rate"]) for row in rows}
-
-    def update_rates(self, rates):
-        try:
-            with self._conn:
-                for vehicle_type, rate in rates.items():
-                    updated = self._conn.execute(
-                        "UPDATE pricing SET hourly_rate = ? WHERE vehicle_type = ?",
-                        (float(rate), vehicle_type),
-                    )
-                    if updated.rowcount != 1:
-                        raise ParkingError(f"No saved price for {vehicle_type}.")
-        except ParkingError:
-            raise
-        except sqlite3.Error:
-            raise ParkingError("Could not update the prices.")
-
-    def history(self, search="", status="All", vehicle_type="All"):
-        sql = """
-            SELECT t.ticket_id, t.registration_number, t.owner_name, t.vehicle_type,
-                   t.slot_number, t.entry_time, t.status,
-                   tr.exit_time, tr.duration_text, tr.billable_hours, tr.hourly_rate, tr.fee
-            FROM parking_tickets AS t
-            LEFT JOIN transactions AS tr ON tr.ticket_id = t.ticket_id
-            WHERE 1 = 1
-        """
-        params = []
-        if status in ("Parked", "Completed"):
-            sql += " AND t.status = ?"
-            params.append(status.lower())
-        if vehicle_type in ("Car", "Motorcycle", "Van"):
-            sql += " AND t.vehicle_type = ?"
-            params.append(vehicle_type)
-        if search and str(search).strip():
-            like = f"%{str(search).strip().upper()}%"
-            sql += " AND (UPPER(t.ticket_id) LIKE ? OR UPPER(t.registration_number) LIKE ? OR UPPER(t.owner_name) LIKE ?)"
-            params.extend([like, like, like])
-        sql += " ORDER BY t.entry_time DESC, t.ticket_id DESC"
-        return self._all(sql, params)
-
-    def counts(self):
-        total = self._conn.execute("SELECT COUNT(*) FROM parking_slots").fetchone()[0]
-        occupied = self._conn.execute(
-            "SELECT COUNT(*) FROM parking_slots WHERE status = 'occupied'"
+    def delete_customer(self, customer_id):
+        used = self._conn.execute(
+            "SELECT COUNT(*) FROM meter_readings WHERE customer_id = ?", (customer_id,)
         ).fetchone()[0]
-        completed = self._conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
-        revenue = self._conn.execute("SELECT COALESCE(SUM(fee), 0) FROM transactions").fetchone()[0]
-        return {
-            "total": total,
-            "occupied": occupied,
-            "available": total - occupied,
-            "completed": completed,
-            "revenue": float(revenue),
-        }
+        if used:
+            raise BillingError("This customer has readings, so the record cannot be deleted.")
+        deleted = self._conn.execute("DELETE FROM customers WHERE id = ?", (customer_id,))
+        self._conn.commit()
+        if deleted.rowcount != 1:
+            raise BillingError("Customer was not found.")
 
-    def visits_by_type(self):
-        rows = self._all("SELECT vehicle_type, COUNT(*) AS visits FROM parking_tickets GROUP BY vehicle_type")
-        return {row["vehicle_type"]: row["visits"] for row in rows}
+    def get_customer(self, customer_id):
+        return self._one("SELECT * FROM customers WHERE id = ?", (customer_id,))
 
-    def revenue_by_type(self):
-        rows = self._all(
-            "SELECT vehicle_type, SUM(fee) AS revenue, COUNT(*) AS sessions FROM transactions GROUP BY vehicle_type"
+    def find_by_meter(self, meter_number):
+        return self._one("SELECT * FROM customers WHERE meter_number = ?", (meter_number,))
+
+    def search_customers(self, text):
+        if not text:
+            return self._all("SELECT * FROM customers ORDER BY name")
+        like = f"%{text.strip().lower()}%"
+        return self._all(
+            """SELECT * FROM customers
+               WHERE lower(name) LIKE ? OR lower(cnic) LIKE ? OR lower(meter_number) LIKE ?
+                  OR lower(phone) LIKE ?
+               ORDER BY name""",
+            (like, like, like, like),
         )
-        return {
-            row["vehicle_type"]: {"revenue": float(row["revenue"]), "sessions": row["sessions"]}
-            for row in rows
-        }
 
-    def daily_revenue(self):
-        rows = self._all(
-            "SELECT substr(exit_time, 1, 10) AS day, SUM(fee) AS revenue FROM transactions GROUP BY day ORDER BY day"
+    def reading_for_month(self, customer_id, month):
+        return self._one(
+            "SELECT * FROM meter_readings WHERE customer_id = ? AND month = ?",
+            (customer_id, month),
         )
-        return [{"day": row["day"], "revenue": float(row["revenue"])} for row in rows]
+
+    def next_bill_no(self):
+        rows = self._all("SELECT bill_no FROM bills")
+        highest = 1000
+        for row in rows:
+            number = row["bill_no"][3:]
+            if row["bill_no"].startswith("EB-") and number.isdigit():
+                highest = max(highest, int(number))
+        return f"EB-{highest + 1}"
+
+    def save_reading_and_bill(self, customer_id, reading, bill):
+        try:
+            with self._conn:
+                cur = self._conn.execute(
+                    """INSERT INTO meter_readings
+                       (customer_id, month, previous_reading, current_reading, units)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (customer_id, reading.month, reading.previous_reading,
+                     reading.current_reading, reading.units),
+                )
+                self._conn.execute(
+                    """INSERT INTO bills (
+                        bill_no, customer_id, reading_id, month, units, energy_charge,
+                        fixed_charge, tax_amount, surcharge, total, due_date, status, paid_date
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unpaid', NULL)""",
+                    (bill.bill_no, customer_id, cur.lastrowid, bill.month, reading.units,
+                     bill.energy_charge, bill.fixed_charge, bill.tax_amount,
+                     bill.surcharge, bill.total, bill.due_date.isoformat()),
+                )
+        except sqlite3.IntegrityError:
+            raise BillingError("This month already has a reading for that meter.")
+        except sqlite3.Error:
+            raise BillingError("Could not save the reading.")
+
+    def list_bills(self):
+        return self._all(
+            """SELECT b.*, c.name, c.meter_number, c.connection_type, c.phone
+               FROM bills AS b
+               JOIN customers AS c ON c.id = b.customer_id
+               ORDER BY b.month DESC, b.bill_no DESC"""
+        )
+
+    def get_bill(self, bill_no):
+        return self._one(
+            """SELECT b.*, c.name, c.meter_number, c.connection_type, c.phone
+               FROM bills AS b JOIN customers AS c ON c.id = b.customer_id
+               WHERE b.bill_no = ?""",
+            (bill_no,),
+        )
+
+    def mark_bill_paid(self, bill_no, surcharge, total, paid_date):
+        try:
+            updated = self._conn.execute(
+                """UPDATE bills
+                   SET status = 'paid', surcharge = ?, total = ?, paid_date = ?
+                   WHERE bill_no = ? AND status = 'unpaid'""",
+                (surcharge, total, paid_date, bill_no),
+            )
+            self._conn.commit()
+            if updated.rowcount != 1:
+                raise BillingError("This bill is already paid or was not found.")
+        except BillingError:
+            raise
+        except sqlite3.Error:
+            raise BillingError("Could not mark the bill as paid.")
+
+    def get_tariffs(self):
+        rows = self._all("SELECT * FROM tariffs")
+        return {row["connection_type"]: row for row in rows}
+
+    def update_tariff(self, connection_type, rates):
+        try:
+            updated = self._conn.execute(
+                """UPDATE tariffs SET slab1_units = ?, slab1_rate = ?, slab2_units = ?,
+                   slab2_rate = ?, slab3_rate = ?, fixed_charge = ?, tax_percent = ?
+                   WHERE connection_type = ?""",
+                (rates["slab1_units"], rates["slab1_rate"], rates["slab2_units"],
+                 rates["slab2_rate"], rates["slab3_rate"], rates["fixed_charge"],
+                 rates["tax_percent"], connection_type),
+            )
+            self._conn.commit()
+            if updated.rowcount != 1:
+                raise BillingError(f"No tariff saved for {connection_type}.")
+        except BillingError:
+            raise
+        except sqlite3.Error:
+            raise BillingError("Could not save the tariff.")
+
+    def get_setting(self, key):
+        row = self._one("SELECT value FROM settings WHERE key = ?", (key,))
+        if row is None:
+            raise BillingError(f"Missing setting {key}.")
+        return float(row["value"])
+
+    def update_setting(self, key, value):
+        try:
+            updated = self._conn.execute(
+                "UPDATE settings SET value = ? WHERE key = ?", (float(value), key)
+            )
+            self._conn.commit()
+            if updated.rowcount != 1:
+                raise BillingError(f"Missing setting {key}.")
+        except BillingError:
+            raise
+        except sqlite3.Error:
+            raise BillingError("Could not save settings.")

@@ -1,10 +1,6 @@
-# CampusPark
+# Electricity Billing
 
-Smart Parking. Simplified.
-
-This is our 3rd semester OOP project. It is a small parking system for a campus lot with 20 slots. The attendant can park a vehicle, see which slots are free, charge a fee when it leaves, and look back at old visits.
-
-The screen is Streamlit. The data is a SQLite file called `data/campuspark.db`. On your own computer that file stays after you refresh the page or restart the app.
+This is our 3rd semester OOP project. It keeps customers, meter readings, and monthly bills for a small electricity office. The screen is Streamlit. The records sit in a SQLite file, `data/billing.db`, so they stay after a refresh on your own computer.
 
 ## How to run
 
@@ -21,82 +17,89 @@ Tests:
 python3 -m pytest tests -v
 ```
 
-The last run on this machine was 14 passed in 0.82 seconds. The full list is in `docs/PROJECT_REPORT.md`.
+The last run here was **13 passed in 0.88s**. The full list is in `docs/PROJECT_REPORT.md`.
 
-## Pages
+## What you can do
 
-- **Dashboard** — slot counts, occupancy, revenue, recent visits, who is parked now.
-- **Vehicle Entry** — registration, owner, type (Car, Motorcycle, Van), and entry time. The first free slot is assigned and a ticket id like `CP-1001` is saved.
-- **Parking Slots** — all 20 slots. Green means free, red means taken.
-- **Vehicle Exit** — search by registration or ticket id, see the bill, then free the slot.
-- **Pricing** — default rates are Car 50, Motorcycle 30, Van 70 PKR per hour. You can change them.
-- **Parking History** — search and filter old visits.
-- **Reports** — completed visits, revenue, and two simple charts.
+- Add, search, update, and delete customers. Each one has a name, CNIC or ID, address, phone, meter number, and a connection type (Domestic or Commercial).
+- Enter a previous and current reading for a month. The current reading cannot be lower than the previous one, and the same month cannot be saved twice for one meter.
+- A bill is made with the reading. The energy charge uses slabs. Domestic and commercial use different slabs. A fixed charge and a tax percent are added. After the due date, an unpaid bill gets a late surcharge.
+- Open a bill, see the breakdown, and mark it paid. You can list unpaid and overdue bills.
+- The dashboard shows customers, bills this month, total billed, collected, and pending, plus two charts.
+- Bill history can be searched by customer, meter, bill number, or month.
+- The Tariff page saves the rates in the database. Later bills use the new rates.
 
-## Fee rule
+## Fee, in short
 
-- The smallest bill is 1 hour, even for a short stay.
-- If the stay goes past a full hour, that extra part is rounded up. 1 hour 20 minutes is billed as 2 hours.
-- An exact number of hours stays exact. 2 hours is billed as 2 hours.
-- The rate on the Pricing page is the one used at exit time.
+Domestic (starting rates):
 
-Example: a car for 1 hour 20 minutes is `2 x PKR 50 = PKR 100`.
+- first 100 units at PKR 10
+- next 100 units at PKR 20
+- anything above that at PKR 30
+- fixed charge PKR 100, tax 10%
+
+Commercial:
+
+- first 100 units at PKR 20
+- the rest at PKR 40
+- fixed charge PKR 200, tax 10%
+
+The due date is the 15th of the next month (that number can be changed). After the due date, 10% is added if the bill is still unpaid. Example: 250 domestic units cost PKR 4,500 for energy, plus PKR 100 fixed, plus PKR 460 tax, so PKR 5,060 before any late fee.
 
 ## Where the OOP is
 
-| Class | File | What it does |
+| Class | File | Idea |
 | --- | --- | --- |
-| `Vehicle`, `Car`, `Motorcycle`, `Van` | `models/vehicle.py` | Parent class and three child classes. Each child overrides `get_type` and `get_hourly_rate`. |
-| `ParkingSlot` | `models/parking_slot.py` | One slot. `occupy` and `release`. |
-| `ParkingTicket` | `models/parking_ticket.py` | One visit. `close` when the vehicle leaves. |
-| `PaymentCalculator` | `services/payment_calculator.py` | Works out the hours and the fee. |
-| `DatabaseManager` | `database/database_manager.py` | All the SQL. Queries use `?` placeholders. |
-| `ParkingManager` | `services/parking_manager.py` | The object the pages call. It keeps a `DatabaseManager` and a `PaymentCalculator`. |
+| `Customer` | `models/customer.py` | Parent. Holds name, CNIC, address, phone, and meter in private attributes. |
+| `DomesticCustomer`, `CommercialCustomer` | same file | Inherit from `Customer` and override `energy_charge`. |
+| `MeterReading` | `models/meter_reading.py` | Checks that the current reading is not below the previous one. |
+| `Bill` | `models/bill.py` | One month's bill. `mark_paid` refuses a second payment. |
+| `TariffCalculator` | `services/tariff_calculator.py` | Calls `customer.energy_charge(...)` without asking which subclass it is. |
+| `BillingManager` | `services/billing_manager.py` | The object the pages use. It keeps a `DatabaseManager` and builds a `TariffCalculator`. |
+| `DatabaseManager` | `database/database_manager.py` | The only class that runs SQL. Values are passed with `?`. |
 
-Private attributes start with `_` and are read through properties. Errors are a single `ParkingError` in `utils/exceptions.py`. The pages catch it and show the message.
+`Customer.energy_charge` raises `NotImplementedError` in the parent. The children have to replace it. That is the simple form of abstraction we used. Errors the user should see are one class, `BillingError`.
 
 ## Database
 
-Tables: `vehicles`, `parking_slots`, `parking_tickets`, `transactions`, `pricing`.
+Tables: `customers`, `meter_readings`, `bills`, `tariffs`, `settings`.
 
-A ticket is the visit. A transaction is the payment, written only when the vehicle exits. The same registration cannot have two parked tickets at once. After exit it can come back.
+`meter_number` is unique. A customer and a month together are unique on readings, so the same month cannot be entered twice.
 
-The `.db` file is in `.gitignore`, so a fresh clone starts empty. The screenshots below are from a sample we entered locally.
+The `.db` file is gitignored. A new clone starts empty. The screenshots below use a few rows we typed in locally.
 
-On Streamlit Community Cloud the disk can be wiped when the app is redeployed or the server restarts. Page changes are fine while it is running. For the viva, run it on a laptop if you need the data to stay.
+On Streamlit Community Cloud the disk can be cleared when the app is redeployed. Clicks and refreshes are fine while it is running. For the viva, run it on a laptop if the data needs to stay.
 
 ## Deploy
 
-1. Push the repo to GitHub.
-2. Open [https://share.streamlit.io/](https://share.streamlit.io/) and sign in with GitHub.
-3. Create an app, pick this repo, and set the main file to `app.py`.
-4. Deploy. `requirements.txt` and `runtime.txt` (Python 3.12) are already there.
+The Cloud app should keep using `app.py` on branch `main`.
 
-No API keys are needed.
+1. Push this repo to GitHub.
+2. Open [https://share.streamlit.io/](https://share.streamlit.io/) and sign in.
+3. The app file stays `app.py`. `requirements.txt` and `runtime.txt` (Python 3.12) are already in the repo.
+4. Redeploy after this branch is merged.
+
+No passwords or API keys are used.
 
 ## Screenshots
 
 ![Dashboard](docs/screenshots/01-dashboard.png)
 
-![Vehicle entry](docs/screenshots/02-vehicle-entry.png)
+![Customers](docs/screenshots/02-customers.png)
 
-![Parking slots](docs/screenshots/03-parking-slots.png)
+![Meter readings](docs/screenshots/03-meter-readings.png)
 
-![Vehicle exit](docs/screenshots/04-vehicle-exit.png)
+![Bills](docs/screenshots/04-bills.png)
 
-![Pricing](docs/screenshots/05-pricing.png)
+![Tariff](docs/screenshots/05-tariff.png)
 
-![History](docs/screenshots/06-parking-history.png)
-
-![Reports](docs/screenshots/07-reports.png)
+![Bill history](docs/screenshots/06-history.png)
 
 ## Team
 
 Both of us should be able to explain the whole program.
 
-- **Student 1** — vehicle and parking models, how a slot is chosen, the fee calculation, and connecting that to the app (`models/`, `services/payment_calculator.py`, `ParkingManager`).
-- **Student 2** — the database class, the Streamlit pages, the entry and exit forms, the tests, and these docs.
+- **Student 1** — models, tariff and billing logic, and connecting that to the app (`models/`, `services/tariff_calculator.py`, `BillingManager`).
+- **Student 2** — the database class, the pages and forms, the tests, and these docs.
 
-The SQL that picks the first free slot is in `DatabaseManager`, because that is the only class that runs SQL. The button calls `ParkingManager.register_vehicle`.
-
-Other write-ups: [viva guide](docs/VIVA_GUIDE.md), [project report](docs/PROJECT_REPORT.md), [presentation](docs/PRESENTATION.md).
+Other notes: [viva guide](docs/VIVA_GUIDE.md), [project report](docs/PROJECT_REPORT.md), [slides](docs/PRESENTATION.md).

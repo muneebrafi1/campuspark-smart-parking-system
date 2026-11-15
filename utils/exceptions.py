@@ -1,2 +1,2 @@
-class ParkingError(Exception):
-    """Raised when the attendant should see a plain error message."""
+class BillingError(Exception):
+    """Shown to the user when a bill or customer cannot be saved."""

@@ -1,127 +1,99 @@
 # Viva guide
 
-Read this with the code open. Say it in your own words.
+Read this with the code open. Answer in your own words.
 
 ## What the program does
 
-An attendant types in a vehicle. The program gives it the lowest free slot and a ticket number. The slot shows as occupied. When the vehicle leaves, the program works out the fee, saves it, and frees the slot. The records are in a SQLite file, so a refresh does not delete them.
+We store electricity customers and their meter readings. When a reading is saved, a bill is made for that month. The bill uses slab rates, a fixed charge, and tax. If it is still unpaid after the due date, a late percent is added. The attendant can mark a bill paid and look up old bills.
 
 ## The classes
 
-`Vehicle` stores the registration and the owner in `_registration_number` and `_owner_name`. You read them with properties. `Car`, `Motorcycle`, and `Van` inherit from `Vehicle` and override `get_type` and `get_hourly_rate`.
+`Customer` keeps `_name`, `_cnic`, `_address`, `_phone`, and `_meter_number`. Other code reads them through properties. `get_connection_type` and `energy_charge` in the parent raise `NotImplementedError`, so a child class has to write them. That is abstraction in a simple form.
 
-`Vehicle.create("car", reg, owner)` returns a `Car` object. The rest of the code can call `get_hourly_rate()` without checking which child it is. That is polymorphism.
+`DomesticCustomer` and `CommercialCustomer` inherit from `Customer`. Each one overrides `energy_charge`. Domestic uses three slabs. Commercial uses two. `TariffCalculator.quote` calls `customer.energy_charge(units, rates)` and does not check the class. That is polymorphism.
 
-`ParkingSlot` is one space. `occupy` fills it. `release` clears it. If you occupy a slot that is already taken, it raises `ParkingError`.
+`MeterReading` refuses a current reading that is lower than the previous one.
 
-`ParkingTicket` is one visit. `close` sets the exit time, the fee, and the status to completed.
+`Bill.mark_paid` refuses to pay a bill that is already paid.
 
-`PaymentCalculator` does the maths only. It does not touch the database.
+`BillingManager` is not a database. It has one (`self._db`) and it builds a `TariffCalculator` when it needs prices. That is composition.
 
-`DatabaseManager` is the only class that uses `sqlite3`.
+`DatabaseManager` is the only file that imports `sqlite3`.
 
-`ParkingManager` has a database object and a calculator object. That is composition. The manager is not a database. It uses one.
+## How a bill is made
 
-## Entry, in order
+1. The form calls `BillingManager.add_reading`.
+2. The month is checked (`2026-11`). If that meter already has that month, we stop.
+3. `MeterReading` checks the numbers and works out the units.
+4. `Customer.create` makes a domestic or commercial object from the saved type.
+5. `TariffCalculator.quote` asks that object for the energy charge, then adds the fixed charge and tax.
+6. The reading and the bill are saved in one transaction. The bill number looks like `EB-1001`.
 
-1. The form calls `ParkingManager.register_vehicle`.
-2. The registration is cleaned (`lea-4521` becomes `LEA-4521`) and the owner name is checked.
-3. `Vehicle.create` makes a Car, Motorcycle, or Van.
-4. If that registration is already parked, we stop.
-5. `first_free_slot` gets the lowest available slot number.
-6. `ParkingSlot.occupy` marks it, then `save_entry` writes the vehicle, the ticket, and the slot in one transaction.
+The due date is a number of days into the next month. The default is 15, so a November bill is due on 15 December. If you mark it paid after that date, the late percent is added to the total.
 
-If all 20 slots are taken, the message says the lot is full and nothing is saved.
+## Tables
 
-## Exit, in order
-
-1. Search by registration or by ticket id (`CP-1001`).
-2. `preview_fee` builds the bill but does not save it.
-3. `save_exit` marks the ticket completed, inserts a row in `transactions`, and sets the slot back to available.
-4. `ticket.close` updates the ticket object in memory.
-
-## The fee
-
-Count the seconds from entry to exit.
-
-- 0 to 60 minutes: 1 hour.
-- Exactly 1 hour: 1 hour.
-- 1 hour and 1 minute: 2 hours.
-- Exactly 3 hours: 3 hours.
-
-Fee = billed hours times the hourly rate. Default rates are Car 50, Motorcycle 30, Van 70. If the admin changes Pricing, the next exit uses the new rate. `Car.get_hourly_rate()` still returns 50. That method is the starting price. The saved rate wins when it exists.
-
-## The tables
-
-- `vehicles` — who arrived.
-- `parking_slots` — slots 1 to 20.
-- `parking_tickets` — every visit, parked or completed.
-- `transactions` — the bill, only after exit.
-- `pricing` — the three hourly rates.
-
-There is a unique index so only one parked row can exist for a registration. After exit the status is completed, so the same car can enter again.
+- `customers` — who has a meter.
+- `meter_readings` — previous, current, and units for one month.
+- `bills` — the money for that reading.
+- `tariffs` — slab sizes, rates, fixed charge, and tax for each connection type.
+- `settings` — late percent and due days.
 
 ## Questions
 
-**1. Why classes instead of one long script?**
-The lot is made of things: a vehicle, a slot, a ticket, a fee, a database. Each one is a class. The page only asks the manager to do the work.
+**1. Why not one long script?**
+A customer, a reading, and a bill are different things. Each one is a class. The page only calls the manager.
 
-**2. What is the difference between the class `Car` and one car object?**
-`Car` is the design. `Car("LEA-4521", "Ali Khan")` is one car. Another registration is another object.
+**2. What is inheritance here?**
+`DomesticCustomer(Customer)` and `CommercialCustomer(Customer)`. They get the name and meter from the parent. They replace `energy_charge`.
 
-**3. What did you override?**
-`get_type` and `get_hourly_rate`. Car returns `"Car"` and 50. Motorcycle returns `"Motorcycle"` and 30. Van returns `"Van"` and 70. The parent versions are the defaults the children replace.
+**3. What is polymorphism here?**
+`quote` calls `customer.energy_charge(...)`. If the object is domestic, the three-slab method runs. If it is commercial, the two-slab method runs. The calculator does not have an `if` for that.
 
-**4. Where is polymorphism?**
-`Vehicle.create` returns different subclasses. `PaymentCalculator.rate_for` calls `vehicle.get_type()` and, if needed, `vehicle.get_hourly_rate()`. It does not have a separate function for each type.
+**4. What is encapsulation here?**
+The name is stored in `_name` and read with the `name` property. There is no setter. The underscore is a convention. Python does not really hide it.
 
-**5. What is encapsulation here?**
-The registration is stored in `_registration_number`. Other code uses the property `registration_number`. There is no setter. The underscore means "please use the property". Python will still let you touch `_registration_number` if you try. It is a convention, not a lock.
+**5. What is abstraction here?**
+The parent `energy_charge` is not a real price. It raises `NotImplementedError`. Only a real connection type can be billed.
 
 **6. Why does the manager not inherit from the database?**
-A manager is not a database. It has a database. Look at `self._db = DatabaseManager(...)` and `self._fees = PaymentCalculator(...)` in `ParkingManager.__init__`.
+A manager is not a database. It uses one. See `self._db = DatabaseManager(...)` in `BillingManager`.
 
-**7. Who picks the slot?**
-`DatabaseManager.first_free_slot` runs `SELECT ... WHERE status = 'available' ORDER BY slot_number LIMIT 1`. The lowest number wins. The page never asks the attendant to type a slot.
+**7. What happens if the meter number is already used?**
+`meter_number` is UNIQUE. The insert fails and we raise `BillingError` saying the meter is already registered. `m-1001` and `M-1001` are the same meter because we store it in uppercase.
 
-**8. What if the lot is full?**
-`first_free_slot` returns nothing. `register_vehicle` raises `ParkingError` with the word "full". The test parks 20 vehicles and checks that the 21st fails.
+**8. What happens if the current reading is lower?**
+`MeterReading.__init__` raises `BillingError`. No row is saved.
 
-**9. What if the same car is entered twice?**
-We look for a parked ticket with that registration and raise `ParkingError`. SQLite also has a unique index on parked registrations, so a second insert would fail too. After exit, the same registration can park again and gets the lowest free slot.
+**9. Can I enter November twice?**
+No. There is a unique pair of customer and month. The manager also checks before saving and says the month already has a reading.
 
-**10. Why uppercase the registration?**
-So `lea-4521` and `LEA-4521` are the same car.
+**10. Walk through 250 domestic units.**
+100 x 10 = 1000, next 100 x 20 = 2000, last 50 x 30 = 1500. Energy is PKR 4,500. Fixed charge is 100. Tax is 10% of 4,600, which is 460. Total is PKR 5,060 if it is paid on time.
 
-**11. A car stays 1 hour 20 minutes. What is the bill?**
-Duration is `1h 20m`. Billed hours is 2. At PKR 50 the fee is PKR 100. Test 08 checks this through `exit_vehicle`.
+**11. How is commercial different?**
+The first 100 units use the commercial slab 1 rate (20). The rest use slab 2 rate (40). Slab 3 is not used. 250 units are 100 x 20 + 150 x 40 = 8,000, then fixed 200 and 10% tax.
 
-**12. A motorcycle stays 20 minutes. What is the bill?**
-1 hour minimum, PKR 30.
+**12. When is the late fee added?**
+Only if the date is after `due_date`. Paying on the due date does not add it. Paying the next day adds `late_percent` of the energy + fixed + tax. The default is 10%.
 
-**13. A van stays exactly 3 hours. What is the bill?**
-3 hours, not 4. `3 x 70 = PKR 210`.
+**13. What is saved when a bill is marked paid?**
+`status` becomes `paid`, `paid_date` is stored, and `total` includes the surcharge if it was late. A second click says the bill is already paid.
 
-**14. The admin changes the car rate while a car is inside. Which rate is used?**
-The rate at exit time. The class method still returns 50.
+**14. What does the dashboard count?**
+Customers in the table. Bills whose month is this month. Collected is the sum of paid totals. Pending is what unpaid bills owe today, including a late fee if they are overdue. Total billed is collected plus pending.
 
-**15. Why both tickets and transactions?**
-A parked car has a ticket but has not paid yet. The transaction row is the money. History joins the two tables.
+**15. How do you know the data survives a restart?**
+`test_persists_after_new_database_manager` closes the manager, opens a new `DatabaseManager` on the same file, and reads the customer back.
 
-**16. How do you know data survives a restart?**
-Test 12 closes the manager, opens a new `DatabaseManager` on the same file, and reads the parked car and the changed rate back.
+**16. Why `?` in the SQL?**
+The meter number is data, not part of the sentence. Example: `WHERE meter_number = ?` with the value in a tuple.
 
-**17. Why is the manager cached in Streamlit?**
-`@st.cache_resource` keeps one `ParkingManager` for the running app. The rows are still read from the file on each action, so a refresh shows what was saved.
+**17. What if SQLite throws?**
+We catch `sqlite3.Error` and raise `BillingError` with a short message. Saving a reading and its bill uses `with self._conn`, so a failure rolls both back.
 
-**18. Show a parameterized query.**
-In `active_by_reg` the registration is passed as `(registration_number,)` next to a `?`. It is not pasted into the SQL string.
+**18. What is weak on Streamlit Cloud?**
+The database file can disappear when the server redeploys. Use a laptop for the demo if you need the rows to stay.
 
-**19. What happens if SQLite fails?**
-`save_entry` and `save_exit` catch `sqlite3.Error` and raise `ParkingError` with a short sentence. The `with self._conn` block rolls the transaction back, so we do not save half an entry.
-
-**20. What is weak about running this on Streamlit Cloud?**
-The SQLite file is on the server disk. A redeploy or reboot can delete it. Clicks and refreshes are fine while that server is up. We run the demo on a laptop when we need the data to stay.
-
-**21. What did each student write?**
-Student 1: models, slot choice from the manager's point of view, fees, and calling the manager from `app.py`. Student 2: `DatabaseManager`, the pages, tests, and docs. Both of us can trace one entry and one exit across both files.
+**19. Who wrote what?**
+Student 1: models, tariff calculator, billing manager, and the calls from `app.py`. Student 2: `DatabaseManager`, the pages, tests, and docs. Both of us should trace one bill from the form to the `bills` table.
